@@ -1,0 +1,15 @@
+profile: default
+region: eu-west-1
+
+# instances will be allocated this time zone
+time_zone: UTC
+
+# Connections from internet will be restricted to this range
+incoming_cidr: 0.0.0.0/0
+
+# Number of kubernetes workers (k3s agents) to create
+num_workers: 3
+
+# Domain name and certificate configuration for the NLB
+domain_name: example.com
+certificate: arn:aws:acm:<region>:xxxxxxxxxxxx:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx

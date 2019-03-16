@@ -1,0 +1,96 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: K3s server node
+
+Resources:
+
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: {{ sceptre_user_data.ami }}
+      InstanceType: {{ sceptre_user_data.instance_type }}
+      SubnetId: !ImportValue k3s-vpc-private-subnet-a
+      IamInstanceProfile: !ImportValue NodeProfile
+      SecurityGroupIds:
+      - !ImportValue OutgoingSG
+      - !ImportValue ServerSg
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -ex
+
+          # Set local time zone
+          rm -f /etc/localtime
+          ln -s /usr/share/zoneinfo/{{ sceptre_user_data.time_zone }} /etc/localtime
+
+          # retrieve state from s3
+          mkdir /root/backups
+          aws s3 sync s3://k3s-server-state/backups/ /root/backups
+          mkdir -p /var/lib/rancher/k3s/server/db
+          [ -f /root/backups/backup.db ] && cp /root/backups/backup.db /var/lib/rancher/k3s/server/db/state.db
+
+          wget -q https://github.com/rancher/k3s/releases/download/v0.2.0/k3s -O /usr/local/bin/k3s
+          chmod a+x /usr/local/bin/k3s
+
+          # Create the cluster secret
+          aws ssm put-parameter --name /k3s/cluster-secret --region ${AWS::Region} --value $(openssl rand -base64 32) --type SecureString --overwrite
+
+          cat <<EOF > /usr/local/bin/cluster-secret
+          #!/bin/sh
+          aws ssm get-parameter --name /k3s/cluster-secret --region ${AWS::Region} --with-decryption --output text --query Parameter.Value --output text
+          EOF
+          chmod a+x /usr/local/bin/cluster-secret
+
+          # Create a service for the k3s server
+          cat <<EOF > /etc/systemd/system/k3s.service
+          [Unit]
+          Description=K3s server
+          After=network.target
+          StartLimitIntervalSec=0
+
+          [Service]
+          Type=simple
+          Restart=always
+          RestartSec=1
+          User=root
+          ExecStart=/usr/bin/sh -c "/usr/local/bin/k3s server --cluster-secret \$(cluster-secret) --disable-agent"
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat <<EOF > /root/rotate-backup.conf
+          /root/backups/backup.db {
+            rotate 20
+          }
+          EOF
+
+          cat <<EOF > /usr/local/bin/backup-k3s-state
+          #!/bin/sh
+          logrotate -f -s /root/rotate-backup.state /root/rotate-backup.conf
+          echo ".backup /root/backups/backup.db" | sqlite3 /var/lib/rancher/k3s/server/db/state.db
+          aws s3 sync /root/backups s3://k3s-server-state/backups/
+          EOF
+          chmod a+x /usr/local/bin/backup-k3s-state
+
+          # Schedule backups every 5 mins
+          cat <<EOF | crontab -
+          PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+          */5 * * * * backup-k3s-state
+          EOF
+
+          systemctl start k3s
+          systemctl status k3s
+
+  DnsEntry:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: internal.{{ sceptre_user_data.domain_name }}.
+      Name: k3s-server.internal.{{ sceptre_user_data.domain_name }}.
+      Type: A
+      ResourceRecords:
+      - !GetAtt Server.PrivateIp
+      TTL: 60

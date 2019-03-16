@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: VPC
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: {{ sceptre_user_data.vpc_cidr }}
+      EnableDnsHostnames: True
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-vpc
+
+  # Subnets and their routes
+  {% for subnet in sceptre_user_data.subnets %}
+  {% set prefix = 'Public' if subnet.public else 'Private' %}
+  {{ prefix }}Subnet{{ subnet.az|upper }}:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: ap-southeast-2{{ subnet.az }}
+      CidrBlock: {{ subnet.cidr }}
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: {{ subnet.public }}
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-{{ 'public' if subnet.public else 'private' }}-{{ subnet.az|upper }}
+
+  {{ prefix }}SubnetRoute{{ subnet.az|upper }}:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref {{ 'MainRouteTable' if subnet.public else 'NatRouteTable' }}
+      SubnetId: !Ref {{ prefix }}Subnet{{ subnet.az|upper }}
+
+  {% endfor %}
+
+  InternalZone:
+    Type: AWS::Route53::HostedZone
+    Properties: 
+      Name: internal.{{ sceptre_user_data.domain_name }}
+      VPCs:
+      - VPCId: !Ref VPC
+        VPCRegion: !Sub ${AWS::Region}
+
+  # Connect public subnets to the internet
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties: 
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName} Gateway
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+  MainRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-main-route-table
+  MainRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref MainRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  NatSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: NatSG
+      GroupDescription: Allow egress to internet
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: {{ sceptre_user_data.vpc_cidr }}
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: {{ sceptre_user_data.vpc_cidr }}
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-nat-sg
+      VpcId: !Ref VPC
+
+  NatInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: {{ sceptre_user_data.nat_ami }}
+      InstanceType: t2.micro
+      SubnetId: !Ref PublicSubnetA
+      SourceDestCheck: false
+      SecurityGroupIds:
+      - !Ref NatSG
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-nat-instance
+  NatRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties: 
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-nat-route-table
+  NatRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref NatRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      InstanceId: !Ref NatInstance
+
+  # Security group to support internet access from private subnet via NAT
+  OutgoingSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: OutgoingSG
+      GroupDescription: Allow egress to internet
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: 0.0.0.0/0
+      Tags:
+      - Key: Name 
+        Value: !Sub ${AWS::StackName}-outgoing-sg
+      VpcId: !Ref VPC
+
+  # Security group to allow incoming connections from the internet
+  IncomingSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: IncomingSG
+      GroupDescription: Allow incoming connections from the internet
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: {{ sceptre_user_data.incoming_cidr }}
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: {{ sceptre_user_data.incoming_cidr }}
+      # Allow connections from inside the VPC for NLB health checks
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: {{ sceptre_user_data.vpc_cidr }}
+      - IpProtocol: tcp
+        FromPort: 443
+        ToPort: 443
+        CidrIp: {{ sceptre_user_data.vpc_cidr }}
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        CidrIp: 127.0.0.1/32 # Overwrite default egress rule
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-incoming-sg
+      VpcId: !Ref VPC
+
+  # IAM configuration to support Session Manager
+  NodeProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - Ref: NodeRole
+      InstanceProfileName: NodeProfile
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: ec2.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+  NodePolicy: 
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyName: NodePolicy
+      PolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+        - Effect: Allow
+          Action:
+          - ssm:GetParameter
+          - ssm:PutParameter
+          Resource:
+          - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/k3s/cluster-secret
+      Roles: 
+      - Ref: NodeRole
+
+  ServerStateBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties: 
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration: 
+        - ServerSideEncryptionByDefault:
+            SSEAlgorithm: aws:kms
+      BucketName: k3s-server-state
+
+  ServerSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: ServerSg
+      GroupDescription: Allow incoming connections from workers
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-server-sg
+      VpcId: !ImportValue k3s-vpc-vpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 6443
+        ToPort: 6443
+        CidrIp: !ImportValue VpcCidr
+
+  WorkerSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: WorkerSg
+      GroupDescription: Allow connections between workers and to server
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-worker-sg
+      VpcId: !ImportValue k3s-vpc-vpc
+
+  WorkerSgCommsIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt WorkerSg.GroupId
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+      SourceSecurityGroupId: !Ref WorkerSg
+  WorkerSgHttpIn:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt WorkerSg.GroupId
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      CidrIp: !ImportValue VpcCidr
+  WorkerSgCommsOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: udp
+      FromPort: 4789
+      ToPort: 4789
+      DestinationSecurityGroupId: !Ref WorkerSg
+      GroupId: !GetAtt WorkerSg.GroupId
+  WorkerSgServerOut:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 6443
+      ToPort: 6443
+      CidrIp: !ImportValue VpcCidr
+      GroupId: !GetAtt WorkerSg.GroupId
+
+Outputs:
+  VPC:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-vpc
+  VpcCidr:
+    Value: !GetAtt VPC.CidrBlock
+    Export:
+      Name: VpcCidr
+
+  # Export the subnets
+  {% for subnet in sceptre_user_data.subnets %}
+  {% set prefix = 'Public' if subnet.public else 'Private' %}
+  {{ prefix }}Subnet{{ subnet.az|upper }}:
+    Value: !Ref {{ prefix }}Subnet{{ subnet.az|upper }}
+    Export:
+      Name: !Sub ${AWS::StackName}-{{ prefix|lower }}-subnet-{{ subnet.az }}
+  {% endfor %}
+
+  OutgoingSG:
+    Value: !Ref OutgoingSG
+    Export:
+      Name: OutgoingSG
+  IncomingSG:
+    Value: !Ref IncomingSG
+    Export:
+      Name: IncomingSG
+  ServerSg:
+    Value: !Ref ServerSg
+    Export:
+      Name: ServerSg
+  WorkerSg:
+    Value: !Ref WorkerSg
+    Export:
+      Name: WorkerSg
+
+  Profile:
+    Value: !Ref NodeProfile
+    Export:
+      Name: NodeProfile

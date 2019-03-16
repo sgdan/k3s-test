@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: K3s cluster with server node and spot workers
+
+Resources:
+
+  WorkerTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: NodeTemplate
+      LaunchTemplateData:
+        ImageId: {{ sceptre_user_data.ami }}
+        InstanceType: {{ sceptre_user_data.instance_type_1 }}
+        IamInstanceProfile:
+          Name: NodeProfile
+        SecurityGroupIds:
+        - !ImportValue IncomingSG
+        - !ImportValue OutgoingSG
+        - !ImportValue WorkerSg
+        UserData:
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              set -ex
+
+              # Set local time zone
+              rm -f /etc/localtime
+              ln -s /usr/share/zoneinfo/{{ sceptre_user_data.time_zone }} /etc/localtime
+
+              wget -q https://github.com/rancher/k3s/releases/download/v0.2.0/k3s -O /usr/local/bin/k3s
+              chmod a+x /usr/local/bin/k3s
+
+              cat <<EOF > /usr/local/bin/cluster-secret
+              #!/bin/sh
+              aws ssm get-parameter --name /k3s/cluster-secret --region ${AWS::Region} --with-decryption --output text --query Parameter.Value --output text
+              EOF
+              chmod a+x /usr/local/bin/cluster-secret
+
+              yum install -y docker
+              systemctl start docker
+
+              # Create a service for the k3s agent
+              cat <<EOF > /etc/systemd/system/k3s.service
+              [Unit]
+              Description=K3s agent
+              After=network.target
+              StartLimitIntervalSec=0
+
+              [Service]
+              Type=simple
+              Restart=always
+              RestartSec=1
+              User=root
+              ExecStart=/usr/bin/sh -c "/usr/local/bin/k3s agent -s https://k3s-server.internal.{{ sceptre_user_data.domain_name }}:6443 --docker --cluster-secret \$(cluster-secret)"
+
+              [Install]
+              WantedBy=multi-user.target
+              EOF
+
+              systemctl start k3s
+              systemctl status k3s
+
+  WorkerGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: WorkerTemplate
+    Properties:
+      Cooldown: 15
+      MinSize: {{ sceptre_user_data.num_workers }}
+      MaxSize: {{ sceptre_user_data.num_workers }}
+      DesiredCapacity: {{ sceptre_user_data.num_workers }}
+      MixedInstancesPolicy:
+        LaunchTemplate:
+          LaunchTemplateSpecification:
+            LaunchTemplateId: !Ref WorkerTemplate
+            Version: !GetAtt [WorkerTemplate, LatestVersionNumber]
+          Overrides:
+          - InstanceType: {{ sceptre_user_data.instance_type_1 }}
+          - InstanceType: {{ sceptre_user_data.instance_type_2 }}
+        InstancesDistribution:
+          OnDemandPercentageAboveBaseCapacity: 0 # i.e. 100% spot
+          SpotAllocationStrategy: lowest-price
+      VPCZoneIdentifier:
+      - !ImportValue k3s-vpc-private-subnet-a
+      - !ImportValue k3s-vpc-private-subnet-b
+      - !ImportValue k3s-vpc-private-subnet-c
+      TargetGroupARNs:
+      - !Ref TargetGroup
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-worker
+        PropagateAtLaunch: true
+
+  NodeSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: NodeSg
+      GroupDescription: Allow connections between k3s nodes
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-node-sg
+      VpcId: !ImportValue k3s-vpc-vpc
+  NodeSgIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: NodeSgHttpsIn
+      GroupId: !GetAtt NodeSg.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref NodeSg
+  NodeSgEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      Description: NodeSgHttpsOut
+      GroupId: !GetAtt NodeSg.GroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !Ref NodeSg
+
+  Nlb:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: WorkerNlb
+      Scheme: internet-facing
+      Tags:
+      - Key: Name
+        Value: !Sub ${AWS::StackName}-worker-nlb
+      Type: network
+      Subnets:
+      - !ImportValue k3s-vpc-public-subnet-a
+      - !ImportValue k3s-vpc-public-subnet-b
+      - !ImportValue k3s-vpc-public-subnet-c
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+      - CertificateArn: {{ sceptre_user_data.certificate }}
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref Nlb
+      Port: 443
+      Protocol: TLS
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: WorkerGroup
+      Port: 80
+      Protocol: TCP
+      VpcId: !ImportValue k3s-vpc-vpc
+      TargetGroupAttributes:
+      - Key: deregistration_delay.timeout_seconds
+        Value: 30
+  DnsEntry:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: {{ sceptre_user_data.domain_name }}.
+      Name: k3s.{{ sceptre_user_data.domain_name }}.
+      AliasTarget:
+        DNSName: !GetAtt Nlb.DNSName
+        HostedZoneId: !GetAtt Nlb.CanonicalHostedZoneID
+      Type: A

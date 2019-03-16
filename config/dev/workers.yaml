@@ -1,0 +1,11 @@
+template_path: workers.j2
+stack_name: k3s-workers
+
+sceptre_user_data:
+  ami: ami-0c9d48b5db609ad6e # amzn2-ami-hvm-2.0.2019.*x86_64-gp2
+  instance_type_1: t3.small
+  instance_type_2: t2.small
+  time_zone: {{ var.time_zone }}
+  domain_name: {{ var.domain_name }}
+  certificate: {{ var.certificate }}
+  num_workers: {{ var.num_workers }}

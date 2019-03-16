@@ -1,0 +1,3 @@
+project_code: k3s
+region: {{ var.region }}
+profile: {{ var.profile }}

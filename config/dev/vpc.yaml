@@ -1,0 +1,28 @@
+template_path: vpc.j2
+stack_name: k3s-vpc
+
+sceptre_user_data:
+  vpc_cidr: 10.0.0.0/16
+  nat_ami: ami-062c04ec46aecd204 # amzn-ami-vpc-nat-hvm-2018.03.0.20181116-x86_64-ebs
+  incoming_cidr: {{ var.incoming_cidr }}
+  domain_name: {{ var.domain_name }}
+
+  subnets:
+  - az: a
+    cidr: 10.0.0.0/24
+    public: true
+  - az: b
+    cidr: 10.0.1.0/24
+    public: true
+  - az: c
+    cidr: 10.0.2.0/24
+    public: true
+  - az: a
+    cidr: 10.0.3.0/24
+    public: false
+  - az: b
+    cidr: 10.0.4.0/24
+    public: false
+  - az: c
+    cidr: 10.0.5.0/24
+    public: false

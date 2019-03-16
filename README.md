@@ -32,12 +32,8 @@ sceptre --var-file=variables.yaml create -y dev/workers.yaml
 Using session manager, log into the server instance.
 
 ```bash
-# switch to root and set kubeconfig
+# switch to root and check that the worker nodes have joined
 sudo su -
-mkdir ~/.kube
-cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
-
-# check that the worker nodes have joined
 k3s kubectl get nodes
 ```
 

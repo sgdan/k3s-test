@@ -70,9 +70,16 @@ Resources:
 
           cat <<EOF > /usr/local/bin/backup-k3s-state
           #!/bin/sh
+
+          # rotate the backup files
           logrotate -f -s /root/rotate-backup.state /root/rotate-backup.conf
+
+          # create new backup and sync all to S3
           echo ".backup /root/backups/backup.db" | sqlite3 /var/lib/rancher/k3s/server/db/state.db
           aws s3 sync /root/backups s3://k3s-server-state/backups/
+
+          # Remove old nodes
+          k3s kubectl get nodes | grep NotReady | awk '{print $1}' | xargs -r k3s kubectl delete node
           EOF
           chmod a+x /usr/local/bin/backup-k3s-state
 

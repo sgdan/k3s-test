@@ -13,3 +13,7 @@ num_workers: 3
 # Domain name and certificate configuration for the NLB
 domain_name: example.com
 certificate: arn:aws:acm:<region>:xxxxxxxxxxxx:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+
+# Spot instance types for the workers
+instance_type_1: t3.small
+instance_type_2: t2.small

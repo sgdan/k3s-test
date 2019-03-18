@@ -1,0 +1,17 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: kuard
+  namespace: kube-system
+  labels:
+    app: traefik-admin
+  annotations:
+    ingress.kubernetes.io/custom-request-headers: "X-Forwarded-Proto: https"
+spec:
+  rules:
+  - host: traefik.{{ domain_name }}
+    http:
+      paths:
+      - backend:
+          serviceName: traefik-ingress-service
+          servicePort: 8080

@@ -56,7 +56,7 @@ Resources:
           Restart=always
           RestartSec=1
           User=root
-          ExecStart=/usr/bin/sh -c "/usr/local/bin/k3s server --cluster-secret \$(cluster-secret) --disable-agent"
+          ExecStart=/usr/bin/sh -c "/usr/local/bin/k3s server --cluster-secret \$(cluster-secret) --disable-agent --no-deploy traefik"
 
           [Install]
           WantedBy=multi-user.target
@@ -64,7 +64,7 @@ Resources:
 
           cat <<EOF > /root/rotate-backup.conf
           /root/backups/backup.db {
-            rotate 20
+            rotate 5
           }
           EOF
 
@@ -83,11 +83,14 @@ Resources:
           EOF
           chmod a+x /usr/local/bin/backup-k3s-state
 
-          # Schedule backups every 5 mins
+          # Schedule backups every hour
           cat <<EOF | crontab -
           PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
-          */5 * * * * backup-k3s-state
+          0 * * * * backup-k3s-state
           EOF
+
+          # convenient alias for kubectl commands
+          echo "alias kubectl='k3s kubectl'" >> /root/.bashrc
 
           systemctl start k3s
           systemctl status k3s

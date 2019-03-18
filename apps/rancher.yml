@@ -1,0 +1,132 @@
+# Simplified rancher installation based on manifests from:
+# https://github.com/rancher/rancher/tree/master/chart
+
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: rancher
+  labels:
+    name: rancher
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: rancher
+  namespace: rancher
+  labels:
+    app: rancher
+subjects:
+- kind: ServiceAccount
+  name: rancher
+  namespace: rancher
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+apiGroup: rbac.authorization.k8s.io
+---
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: rancher
+  namespace: rancher
+  labels:
+    app: rancher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rancher
+  template:
+    metadata:
+      labels:
+        app: rancher
+    spec:
+      serviceAccountName: rancher
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - rancher
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - image: rancher/rancher:v2.2.0-rc6
+        name: rancher
+        ports:
+        - containerPort: 80
+          protocol: TCP
+        args:
+        - "--no-cacerts"
+        - "--http-listen-port=80"
+        - "--https-listen-port=443"
+        - "--add-local=auto" # Rancher will detect the cluster it's running on
+        env:
+        - name: CATTLE_NAMESPACE
+          value: rancher
+        - name: CATTLE_PEER_SERVICE
+          value: rancher
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        resources:
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: rancher
+  namespace: rancher
+  labels:
+    app: rancher
+  annotations:
+    # Rancher needs this so that it doesn't send 302 redirect to HTTPS
+    ingress.kubernetes.io/custom-request-headers: "X-Forwarded-Proto: https"
+
+    # nginx ingress controller ignores the above, below snippet adds
+    # but doesn't replace the headers
+    #nginx.ingress.kubernetes.io/configuration-snippet: |
+    #  proxy_set_header X-Forwarded-Proto https;
+    #  proxy_set_header X-Forwarded-Port 443;
+spec:
+  rules:
+  - host: rancher.{{ domain_name }}  # hostname to access rancher server
+    http:
+      paths:
+      - backend:
+          serviceName: rancher
+          servicePort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: rancher
+  namespace: rancher
+  labels:
+    app: rancher
+spec:
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    app: rancher
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: rancher
+  namespace: rancher
+  labels:
+    app: rancher

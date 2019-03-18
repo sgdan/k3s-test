@@ -156,7 +156,7 @@ Resources:
     Type: AWS::Route53::RecordSet
     Properties:
       HostedZoneName: {{ sceptre_user_data.domain_name }}.
-      Name: k3s.{{ sceptre_user_data.domain_name }}.
+      Name: "*.{{ sceptre_user_data.domain_name }}."
       AliasTarget:
         DNSName: !GetAtt Nlb.DNSName
         HostedZoneId: !GetAtt Nlb.CanonicalHostedZoneID
